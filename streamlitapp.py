@@ -13,10 +13,9 @@ from db import (
     complete_session
 )
 
-# --------------------------------------------------
+# -----------------------------
 # Helpers
-# --------------------------------------------------
-
+# -----------------------------
 def extract_text(uploaded_file):
     name = uploaded_file.name.lower()
 
@@ -37,39 +36,22 @@ def extract_text(uploaded_file):
     raise ValueError("Unsupported file format")
 
 
-# --------------------------------------------------
-# Streamlit Setup
-# --------------------------------------------------
-
-st.set_page_config(
-    page_title="Multi-Round Interview Agent",
-    layout="centered"
-)
-
+# -----------------------------
+# Page setup
+# -----------------------------
+st.set_page_config(page_title="Multi-Round Interview Agent")
 st.title("🧠 Multi-Round Interview Agent")
-st.markdown(
-    """
-This system evaluates candidates through **three sequential models**:
+st.caption("A candidate must pass each stage to proceed.")
 
-1️⃣ Resume Screening  
-2️⃣ Technical Evaluation  
-3️⃣ Scenario-Based Reasoning  
-
-A candidate must **pass each stage** to proceed.
-"""
-)
-
-# --------------------------------------------------
-# Session State Init
-# --------------------------------------------------
-
+# -----------------------------
+# Session state
+# -----------------------------
 if "stage" not in st.session_state:
     st.session_state.stage = 1
 
-# --------------------------------------------------
-# Stage 1 — Resume Screening
-# --------------------------------------------------
-
+# =========================================================
+# LEVEL 1 — RESUME SCREENING
+# =========================================================
 if st.session_state.stage == 1:
     st.header("📄 Level 1 — Resume Screening")
 
@@ -109,25 +91,26 @@ if st.session_state.stage == 1:
 
             st.session_state.session_id = session_id
             st.session_state.resume_text = resume_text
-            st.session_state.stage1_pass = result["pass"]
+            st.session_state.l1 = result
 
             if result["pass"]:
                 st.success("✅ PASSED Resume Screening")
-                st.session_state.stage = 2
+                st.metric("Score", round(result["score"], 2))
+                st.write("Reason:", result["reason"])
+
+                if st.button("➡️ Proceed to Technical Round"):
+                    st.session_state.stage = 2
+                    st.experimental_rerun()
             else:
                 st.error("❌ FAILED Resume Screening")
+                st.metric("Score", round(result["score"], 2))
+                st.write("Reason:", result["reason"])
 
-            st.write("Score:", result["score"])
-            st.write("Reason:", result["reason"])
-
-# --------------------------------------------------
-# Stage 2 — Technical Evaluation
-# --------------------------------------------------
-
+# =========================================================
+# LEVEL 2 — TECHNICAL EVALUATION
+# =========================================================
 elif st.session_state.stage == 2:
     st.header("🧪 Level 2 — Technical Evaluation")
-
-    st.write("Answer the technical competency checks:")
 
     q1 = st.checkbox("Understands APIs & HTTP")
     q2 = st.checkbox("Understands Databases & Indexing")
@@ -155,20 +138,22 @@ elif st.session_state.stage == 2:
             metrics=result
         )
 
-        st.session_state.stage2_pass = result["pass"]
+        st.session_state.l2 = result
 
         if result["pass"]:
             st.success("✅ PASSED Technical Evaluation")
-            st.session_state.stage = 3
+            st.metric("Pass Probability", round(result["prob_pass"], 2))
+
+            if st.button("➡️ Proceed to Scenario Round"):
+                st.session_state.stage = 3
+                st.experimental_rerun()
         else:
             st.error("❌ FAILED Technical Evaluation")
+            st.metric("Pass Probability", round(result["prob_pass"], 2))
 
-        st.write("Pass Probability:", result["prob_pass"])
-
-# --------------------------------------------------
-# Stage 3 — Scenario + Final Verdict
-# --------------------------------------------------
-
+# =========================================================
+# LEVEL 3 — SCENARIO + FINAL VERDICT
+# =========================================================
 elif st.session_state.stage == 3:
     st.header("🧠 Level 3 — Scenario Reasoning")
 
@@ -179,7 +164,7 @@ elif st.session_state.stage == 3:
 
     if st.button("Run Scenario Evaluation"):
         if not scenario.strip():
-            st.error("Scenario answer is required.")
+            st.error("Scenario answer required.")
         else:
             result = level3_scenario(scenario)
 
@@ -207,14 +192,16 @@ elif st.session_state.stage == 3:
             st.markdown("---")
             st.subheader("🏁 Final Verdict")
 
+            st.metric("Scenario Score", round(result["score"], 2))
+
             if result["pass"]:
                 st.success(f"✅ FINAL DECISION: {final_decision}")
             else:
-                st.error(f"⚠️ FINAL DECISION: {final_decision}")
+                st.warning(f"⚠️ FINAL DECISION: {final_decision}")
 
-            st.write("Score:", result["score"])
-            st.write("Reason:", result["reason"])
-            st.write("Session ID:", st.session_state.session_id)
-
-            with st.expander("📄 View Resume Text"):
-                st.text(st.session_state.resume_text)
+            with st.expander("📊 Full Metrics"):
+                st.json({
+                    "Level 1": st.session_state.l1,
+                    "Level 2": st.session_state.l2,
+                    "Level 3": result
+                })
