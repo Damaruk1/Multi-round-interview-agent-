@@ -1,207 +1,171 @@
 import streamlit as st
 import pdfplumber
 from docx import Document
+import io
 
-from models.Level1screening import level1_screen
-from models.Level2technical import level2_technical
-from models.Level3scenario import level3_scenario
+st.set_page_config(page_title="Multi-Round Interview Agent", layout="wide")
 
-from db import (
-    upsert_candidate,
-    create_session,
-    save_round_result,
-    complete_session
-)
+# ------------------ SESSION STATE ------------------
+if "level" not in st.session_state:
+    st.session_state.level = 1
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def extract_text(uploaded_file):
-    name = uploaded_file.name.lower()
+# ------------------ FILE READERS ------------------
+def read_pdf(file):
+    text = ""
+    with pdfplumber.open(file) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() or ""
+    return text
 
-    if name.endswith(".txt"):
-        return uploaded_file.read().decode("utf-8", errors="ignore")
+def read_docx(file):
+    doc = Document(file)
+    return "\n".join(p.text for p in doc.paragraphs)
 
-    if name.endswith(".pdf"):
-        text = ""
-        with pdfplumber.open(uploaded_file) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        return text
+def read_txt(file):
+    return file.read().decode("utf-8")
 
-    if name.endswith(".docx"):
-        doc = Document(uploaded_file)
-        return "\n".join(p.text for p in doc.paragraphs)
+# ------------------ LEVEL 1 MODEL ------------------
+def resume_screening(resume_text, role):
+    skills = ["python", "api", "database", "sql", "cloud", "docker"]
+    found = sum(1 for s in skills if s in resume_text.lower())
 
-    raise ValueError("Unsupported file format")
+    skill_match = min(100, found / len(skills) * 100)
+    structure = 100 if len(resume_text.split()) > 200 else 70
+    keyword_coverage = min(100, found * 15)
 
+    final_score = round((skill_match + structure + keyword_coverage) / 3, 2)
+    passed = final_score >= 60
 
-# -----------------------------
-# Page setup
-# -----------------------------
-st.set_page_config(page_title="Multi-Round Interview Agent")
-st.title("🧠 Multi-Round Interview Agent")
-st.caption("A candidate must pass each stage to proceed.")
-
-# -----------------------------
-# Session state
-# -----------------------------
-if "stage" not in st.session_state:
-    st.session_state.stage = 1
-
-# =========================================================
-# LEVEL 1 — RESUME SCREENING
-# =========================================================
-if st.session_state.stage == 1:
-    st.header("📄 Level 1 — Resume Screening")
-
-    role = st.selectbox(
-        "Role Applied For",
-        ["Backend Engineer", "Data Engineer", "ML Engineer"]
-    )
-
-    resume = st.file_uploader(
-        "Upload Resume (PDF / DOCX / TXT)",
-        type=["pdf", "docx", "txt"]
-    )
-
-    if st.button("Run Resume Screening"):
-        if not resume:
-            st.error("Please upload a resume.")
-        else:
-            resume_text = extract_text(resume)
-
-            candidate_id = upsert_candidate("Unknown", role=role)
-            session_id = create_session(candidate_id)
-
-            result = level1_screen(resume_text)
-
-            save_round_result(
-                session_id=session_id,
-                round_no=1,
-                owner="Level 1 Screening",
-                question=f"Resume Screening for {role}",
-                answer=resume_text,
-                raw_score=result["score"],
-                score=result["score"],
-                passed=result["pass"],
-                threshold=60.0,
-                features=result
-            )
-
-            st.session_state.session_id = session_id
-            st.session_state.resume_text = resume_text
-            st.session_state.l1 = result
-
-            if result["pass"]:
-                st.success("✅ PASSED Resume Screening")
-                st.metric("Score", round(result["score"], 2))
-                st.write("Reason:", result["reason"])
-
-                if st.button("➡️ Proceed to Technical Round"):
-                    st.session_state.stage = 2
-                    st.experimental_rerun()
-            else:
-                st.error("❌ FAILED Resume Screening")
-                st.metric("Score", round(result["score"], 2))
-                st.write("Reason:", result["reason"])
-
-# =========================================================
-# LEVEL 2 — TECHNICAL EVALUATION
-# =========================================================
-elif st.session_state.stage == 2:
-    st.header("🧪 Level 2 — Technical Evaluation")
-
-    q1 = st.checkbox("Understands APIs & HTTP")
-    q2 = st.checkbox("Understands Databases & Indexing")
-    q3 = st.checkbox("Understands Scalability & Caching")
-
-    answers = {
-        "q1": {"correct": q1},
-        "q2": {"correct": q2},
-        "q3": {"correct": q3},
+    return {
+        "skill_match": round(skill_match, 2),
+        "structure": structure,
+        "keyword_coverage": round(keyword_coverage, 2),
+        "score": final_score,
+        "pass": passed
     }
 
+# ------------------ LEVEL 2 MODEL ------------------
+def technical_evaluation(apis, db, scale):
+    score = (apis + db + scale) / 3
+    passed = score >= 0.6
+    return {
+        "probability": round(score, 3),
+        "pass": passed
+    }
+
+# ------------------ LEVEL 3 MODEL ------------------
+def scenario_evaluation(answer):
+    text = answer.lower()
+
+    flow = any(w in text for w in ["first", "then", "finally"])
+    tradeoff = any(w in text for w in ["tradeoff", "latency", "cost"])
+    stability = any(w in text for w in ["monitor", "rollback", "reliability"])
+
+    score = round((flow + tradeoff + stability) / 3 * 100, 2)
+    passed = score >= 70
+
+    return {
+        "flow": flow,
+        "tradeoff": tradeoff,
+        "stability": stability,
+        "score": score,
+        "pass": passed
+    }
+
+# ==================================================
+# =================== LEVEL 1 ======================
+# ==================================================
+if st.session_state.level == 1:
+    st.title("📄 Level 1 — Resume Screening")
+
+    role = st.selectbox("Role Applied For", ["Backend Engineer", "ML Engineer", "DevOps Engineer"])
+    file = st.file_uploader("Upload Resume (PDF / DOCX / TXT)", type=["pdf", "docx", "txt"])
+
+    if st.button("Run Resume Screening") and file:
+        if file.type == "application/pdf":
+            resume_text = read_pdf(file)
+        elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            resume_text = read_docx(file)
+        else:
+            resume_text = read_txt(file)
+
+        result = resume_screening(resume_text, role)
+        st.session_state.level1 = result
+
+    if "level1" in st.session_state:
+        r = st.session_state.level1
+
+        st.subheader("📊 Resume Screening Metrics")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Skill Match (%)", r["skill_match"])
+        c2.metric("Structure (%)", r["structure"])
+        c3.metric("Keyword Coverage (%)", r["keyword_coverage"])
+
+        st.metric("Final Score", r["score"])
+
+        if r["pass"]:
+            st.success("✅ PASSED Resume Screening")
+            if st.button("➡ Proceed to Technical Evaluation"):
+                st.session_state.level = 2
+                st.rerun()
+        else:
+            st.error("❌ FAILED Resume Screening")
+
+# ==================================================
+# =================== LEVEL 2 ======================
+# ==================================================
+elif st.session_state.level == 2:
+    st.title("🧪 Level 2 — Technical Evaluation")
+
+    apis = st.checkbox("Understands APIs & HTTP")
+    db = st.checkbox("Understands Databases & Indexing")
+    scale = st.checkbox("Understands Scalability & Caching")
+
     if st.button("Run Technical Evaluation"):
-        result = level2_technical(answers)
+        result = technical_evaluation(apis, db, scale)
+        st.session_state.level2 = result
 
-        save_round_result(
-            session_id=st.session_state.session_id,
-            round_no=2,
-            owner="Level 2 Technical",
-            question="Technical Evaluation",
-            answer=str(answers),
-            raw_score=result["prob_pass"] * 100,
-            score=result["prob_pass"] * 100,
-            passed=result["pass"],
-            threshold=50.0,
-            metrics=result
-        )
+    if "level2" in st.session_state:
+        r = st.session_state.level2
 
-        st.session_state.l2 = result
+        st.subheader("📊 Technical Metrics")
+        st.metric("Pass Probability", r["probability"])
 
-        if result["pass"]:
+        if r["pass"]:
             st.success("✅ PASSED Technical Evaluation")
-            st.metric("Pass Probability", round(result["prob_pass"], 2))
-
-            if st.button("➡️ Proceed to Scenario Round"):
-                st.session_state.stage = 3
-                st.experimental_rerun()
+            if st.button("➡ Proceed to Scenario Evaluation"):
+                st.session_state.level = 3
+                st.rerun()
         else:
             st.error("❌ FAILED Technical Evaluation")
-            st.metric("Pass Probability", round(result["prob_pass"], 2))
 
-# =========================================================
-# LEVEL 3 — SCENARIO + FINAL VERDICT
-# =========================================================
-elif st.session_state.stage == 3:
-    st.header("🧠 Level 3 — Scenario Reasoning")
+# ==================================================
+# =================== LEVEL 3 ======================
+# ==================================================
+elif st.session_state.level == 3:
+    st.title("🧠 Level 3 — Scenario Evaluation")
 
-    scenario = st.text_area(
-        "Describe how you would handle a production outage",
+    answer = st.text_area(
+        "Explain how you would design a scalable backend system",
         height=200
     )
 
-    if st.button("Run Scenario Evaluation"):
-        if not scenario.strip():
-            st.error("Scenario answer required.")
+    if st.button("Run Scenario Evaluation") and answer:
+        result = scenario_evaluation(answer)
+        st.session_state.level3 = result
+
+    if "level3" in st.session_state:
+        r = st.session_state.level3
+
+        st.subheader("📊 Scenario Metrics")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Logical Flow", r["flow"])
+        c2.metric("Trade-offs", r["tradeoff"])
+        c3.metric("Stability Awareness", r["stability"])
+
+        st.metric("Final Score", r["score"])
+
+        if r["pass"]:
+            st.success("🎉 FINAL VERDICT: SELECTED")
         else:
-            result = level3_scenario(scenario)
-
-            save_round_result(
-                session_id=st.session_state.session_id,
-                round_no=3,
-                owner="Level 3 Scenario",
-                question="Production Incident Handling",
-                answer=scenario,
-                raw_score=result["score"],
-                score=result["score"],
-                passed=result["pass"],
-                threshold=75.0,
-                metrics=result
-            )
-
-            final_decision = "HIRE" if result["pass"] else "HOLD"
-
-            complete_session(
-                session_id=st.session_state.session_id,
-                final_score=result["score"],
-                final_decision=final_decision
-            )
-
-            st.markdown("---")
-            st.subheader("🏁 Final Verdict")
-
-            st.metric("Scenario Score", round(result["score"], 2))
-
-            if result["pass"]:
-                st.success(f"✅ FINAL DECISION: {final_decision}")
-            else:
-                st.warning(f"⚠️ FINAL DECISION: {final_decision}")
-
-            with st.expander("📊 Full Metrics"):
-                st.json({
-                    "Level 1": st.session_state.l1,
-                    "Level 2": st.session_state.l2,
-                    "Level 3": result
-                })
+            st.error("❌ FINAL VERDICT: REJECTED")
